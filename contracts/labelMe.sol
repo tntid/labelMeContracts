@@ -63,6 +63,12 @@ contract ReleaseNFT is ERC721, ERC721Enumerable, Ownable {
     }
 }
 
+    // Add IWETH interface
+    interface IWETH {
+        function deposit() external payable;
+        function withdraw(uint256) external;
+    }
+
 contract Releaser is Ownable {
     IERC20 public feeToken;
     uint256 public releaseFee;
@@ -131,16 +137,18 @@ contract Releaser is Ownable {
         require(feeToken.transferFrom(msg.sender, owner(), releaseFee), "Release fee transfer failed");
         require(swapTokenAddress != address(0), "Swap token address not set");
 
-        // Swap ETH for tokens
+        uint256 halfEthAmount = msg.value / 2;
+
+        // Swap half of the ETH for tokens
         uint256 deadline = block.timestamp + 15; // 15 seconds from now
-        uint256 amountOut = swapExactInputSingle(msg.value, deadline);
+        uint256 amountOut = swapExactInputSingle(halfEthAmount, deadline);
 
         require(amountOut > 0, "Swap failed");
 
-        // Transfer the swapped tokens to this contract
-        TransferHelper.safeTransferFrom(swapTokenAddress, address(this), address(this), amountOut);
+        // Transfer the swapped tokens to the label owner
+        IERC20(swapTokenAddress).transfer(owner(), amountOut);
 
-        // Create the new token
+        // Create the new token with 0 decimals
         string memory fullName = string(abi.encodePacked(labelName, " ", name));
         NewToken newToken = new NewToken(fullName, symbol, totalSupply, address(this));
         
@@ -148,7 +156,7 @@ contract Releaser is Ownable {
         address poolAddress = uniswapFactory.createPool(address(newToken), WETH, 3000);
         IUniswapV3Pool pool = IUniswapV3Pool(poolAddress);
         
-        uint160 sqrtPriceX96 = uint160(sqrt(amountOut * 2**192 / totalSupply));
+        uint160 sqrtPriceX96 = uint160(sqrt(totalSupply * 2**192 / msg.value));
         pool.initialize(sqrtPriceX96);
 
         uint256 liquidityAmount = (totalSupply * liquidityPercentage) / 100;
@@ -157,13 +165,23 @@ contract Releaser is Ownable {
         int24 maxTick = TickMath.getTickAtSqrtRatio(uint160(sqrt(maxPrice) * 2**96));
 
         newToken.approve(address(this), liquidityAmount);
+
+        // Add liquidity to the pool with half ETH and corresponding amount of new tokens
         (uint256 amount0, uint256 amount1) = LiquidityAmounts.getAmountsForLiquidity(
             sqrtPriceX96,
             TickMath.getSqrtRatioAtTick(minTick),
             TickMath.getSqrtRatioAtTick(maxTick),
             uint128(liquidityAmount)
         );
-        pool.mint(address(this), minTick, maxTick, uint128(liquidityAmount), abi.encode(amount0, amount1));
+
+        if (address(newToken) < WETH) {
+            pool.mint(address(this), minTick, maxTick, uint128(liquidityAmount), abi.encode(amount0, halfEthAmount));
+        } else {
+            pool.mint(address(this), minTick, maxTick, uint128(liquidityAmount), abi.encode(halfEthAmount, amount1));
+        }
+
+        // Wrap remaining ETH to WETH
+        IWETH(WETH).deposit{value: address(this).balance}();
 
         if (liquidityPercentage < 100) {
             newToken.transfer(msg.sender, totalSupply - liquidityAmount);
@@ -217,8 +235,6 @@ contract Releaser is Ownable {
     }
 
     function swapExactInputSingle(uint256 amountIn, uint256 deadline) internal returns (uint256 amountOut) {
-        TransferHelper.safeApprove(WETH, address(swapRouter), amountIn);
-
         ISwapRouter.ExactInputSingleParams memory params =
             ISwapRouter.ExactInputSingleParams({
                 tokenIn: WETH,
@@ -231,6 +247,7 @@ contract Releaser is Ownable {
                 sqrtPriceLimitX96: 0
             });
 
+        // The router will wrap ETH automatically
         amountOut = swapRouter.exactInputSingle{value: amountIn}(params);
     }
 
@@ -251,8 +268,14 @@ contract Releaser is Ownable {
 }
 
 contract NewToken is ERC20 {
-    constructor(string memory name, string memory symbol, uint256 totalSupply, address owner) ERC20(name, symbol) {
+    constructor(string memory name, string memory symbol, uint256 totalSupply, address owner) 
+        ERC20(name, symbol)
+    {
         _mint(owner, totalSupply);
+    }
+
+    function decimals() public view virtual override returns (uint8) {
+        return 0;
     }
 }
 
