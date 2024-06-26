@@ -1,43 +1,54 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.0;
+pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import "@uniswap/v3-periphery/contracts/libraries/TickMath.sol";
+import '@uniswap/v3-core/contracts/libraries/TickMath.sol';
 import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 
 contract ReleaseNFT is ERC721, ERC721Enumerable, Ownable {
-    using Counters for Counters.Counter;
-    Counters.Counter private _tokenIds;
+    uint256 private _nextTokenId;
 
     mapping(uint256 => string) private _tokenIPFSHashes;
 
-    constructor(string memory name, string memory symbol) ERC721(name, symbol) {}
+    constructor(string memory name, string memory symbol, address initialOwner) 
+        ERC721(name, symbol) 
+        Ownable(initialOwner)
+    {
+        _nextTokenId = 1;
+    }
 
     function mintRelease(address to, string memory ipfsHash) external onlyOwner returns (uint256) {
-        _tokenIds.increment();
-        uint256 newTokenId = _tokenIds.current();
+        uint256 newTokenId = _nextTokenId;
         _safeMint(to, newTokenId);
         _tokenIPFSHashes[newTokenId] = ipfsHash;
+        _nextTokenId++;
         return newTokenId;
     }
 
     function getIPFSHash(uint256 tokenId) external view returns (string memory) {
-        require(_exists(tokenId), "Token does not exist");
+        require(_ownerOf(tokenId) != address(0), "Token does not exist");
         return _tokenIPFSHashes[tokenId];
     }
 
-    function _beforeTokenTransfer(address from, address to, uint256 tokenId, uint256 batchSize)
+    function _update(address to, uint256 tokenId, address auth)
+        internal
+        override(ERC721, ERC721Enumerable)
+        returns (address)
+    {
+        return super._update(to, tokenId, auth);
+    }
+
+    function _increaseBalance(address account, uint128 value)
         internal
         override(ERC721, ERC721Enumerable)
     {
-        super._beforeTokenTransfer(from, to, tokenId, batchSize);
+        super._increaseBalance(account, value);
     }
 
     function supportsInterface(bytes4 interfaceId)
@@ -82,13 +93,12 @@ contract Releaser is Ownable {
         address _uniswapFactory,
         string memory _labelName,
         address _owner
-    ) {
+    ) Ownable(_owner) {
         feeToken = IERC20(_feeTokenAddress);
         releaseFee = _releaseFee;
         uniswapFactory = IUniswapV3Factory(_uniswapFactory);
         labelName = _labelName;
-        releaseNFT = new ReleaseNFT(string(abi.encodePacked(_labelName, " Releases")), "RLSNFT");
-        _transferOwnership(_owner);
+        releaseNFT = new ReleaseNFT(string(abi.encodePacked(_labelName, " Releases")), "RLSNFT", _owner);
     }
 
     function createNewRelease(
@@ -198,7 +208,7 @@ contract LabelFactory is Ownable {
     event LabelCreated(address indexed releaserAddress, string labelName, address owner);
     event LaunchFeeUpdated(uint256 newFee);
 
-    constructor(address _feeTokenAddress, uint256 _launchFee, address _uniswapFactory) {
+    constructor(address _feeTokenAddress, uint256 _launchFee, address _uniswapFactory, address initialOwner) Ownable(initialOwner) {
         feeToken = IERC20(_feeTokenAddress);
         launchFee = _launchFee;
         uniswapFactory = _uniswapFactory;
