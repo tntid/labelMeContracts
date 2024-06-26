@@ -7,16 +7,19 @@ async function main() {
 
   // You need to replace these with actual values
   const feeTokenAddress = "0xA61152baa58478e1089c000e84755f889aC3D442"; // Address of the ERC20 token used for fees
-  const launchFee = hre.ethers.parseEther("500"); // Example: 100 tokens
+  const launchFee = hre.ethers.parseEther("500"); // Example: 500 tokens
   const uniswapFactoryAddress = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
+  const swapTokenAddress = "0xA61152baa58478e1089c000e84755f889aC3D442";
 
   const LabelFactory = await hre.ethers.getContractFactory("LabelFactory");
   const labelFactory = await LabelFactory.deploy(
     feeTokenAddress,
     launchFee,
     uniswapFactoryAddress,
+    swapTokenAddress,
     deployer.address
   );
+
 
   await labelFactory.waitForDeployment();
 

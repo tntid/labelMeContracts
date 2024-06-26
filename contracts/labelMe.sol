@@ -10,6 +10,8 @@ import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import '@uniswap/v3-core/contracts/libraries/TickMath.sol';
 import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
+import '@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol';
+import '@uniswap/v3-periphery/contracts/libraries/TransferHelper.sol';
 
 contract ReleaseNFT is ERC721, ERC721Enumerable, Ownable {
     uint256 private _nextTokenId;
@@ -68,6 +70,10 @@ contract Releaser is Ownable {
     address public constant WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1; // Arbitrum WETH address
     string public labelName;
     ReleaseNFT public releaseNFT;
+    uint256 public requiredEthAmount;
+    bool public onlyLabelOwner;
+    address public swapTokenAddress;
+    ISwapRouter public constant swapRouter = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
 
     struct Release {
         address tokenAddress;
@@ -86,19 +92,27 @@ contract Releaser is Ownable {
     event NewReleaseCreated(address indexed newTokenAddress, string name, string symbol, uint256 totalSupply, uint256 liquidityPercentage, int24 minTick, int24 maxTick, address poolAddress, uint256 nftTokenId);
     event ReleaseFeeUpdated(uint256 newFee);
     event FeesClaimed(uint256 indexed releaseIndex, uint256 amount0, uint256 amount1, address collector);
+    event RequiredEthAmountUpdated(uint256 newAmount);
+    event OnlyLabelOwnerUpdated(bool newValue);
 
     constructor(
         address _feeTokenAddress,
         uint256 _releaseFee,
         address _uniswapFactory,
         string memory _labelName,
-        address _owner
+        address _owner,
+        uint256 _initialRequiredEthAmount,
+        bool _onlyLabelOwner,
+        address _swapTokenAddress
     ) Ownable(_owner) {
         feeToken = IERC20(_feeTokenAddress);
         releaseFee = _releaseFee;
         uniswapFactory = IUniswapV3Factory(_uniswapFactory);
         labelName = _labelName;
         releaseNFT = new ReleaseNFT(string(abi.encodePacked(_labelName, " Releases")), "RLSNFT", _owner);
+        requiredEthAmount = _initialRequiredEthAmount;
+        onlyLabelOwner = _onlyLabelOwner;
+        swapTokenAddress = _swapTokenAddress;
     }
 
     function createNewRelease(
@@ -110,19 +124,31 @@ contract Releaser is Ownable {
         uint256 minPrice,
         uint256 maxPrice
     ) external payable {
-        require(msg.value >= 0.0005 ether, "Insufficient ETH sent");
+        if (onlyLabelOwner) {
+            require(msg.sender == owner(), "Only label owner can create releases");
+        }
+        require(msg.value >= requiredEthAmount, "Insufficient ETH sent");
         require(feeToken.transferFrom(msg.sender, owner(), releaseFee), "Release fee transfer failed");
-        require(liquidityPercentage > 0 && liquidityPercentage <= 100, "Invalid liquidity percentage");
-        require(bytes(ipfsHash).length > 0, "IPFS hash cannot be empty");
-        require(minPrice < maxPrice, "Min price must be less than max price");
+        require(swapTokenAddress != address(0), "Swap token address not set");
 
+        // Swap ETH for tokens
+        uint256 deadline = block.timestamp + 15; // 15 seconds from now
+        uint256 amountOut = swapExactInputSingle(msg.value, deadline);
+
+        require(amountOut > 0, "Swap failed");
+
+        // Transfer the swapped tokens to this contract
+        TransferHelper.safeTransferFrom(swapTokenAddress, address(this), address(this), amountOut);
+
+        // Create the new token
         string memory fullName = string(abi.encodePacked(labelName, " ", name));
         NewToken newToken = new NewToken(fullName, symbol, totalSupply, address(this));
         
+        // Create Uniswap pool for the new token
         address poolAddress = uniswapFactory.createPool(address(newToken), WETH, 3000);
         IUniswapV3Pool pool = IUniswapV3Pool(poolAddress);
         
-        uint160 sqrtPriceX96 = uint160(sqrt(msg.value * 2**192 / totalSupply));
+        uint160 sqrtPriceX96 = uint160(sqrt(amountOut * 2**192 / totalSupply));
         pool.initialize(sqrtPriceX96);
 
         uint256 liquidityAmount = (totalSupply * liquidityPercentage) / 100;
@@ -180,6 +206,34 @@ contract Releaser is Ownable {
         emit ReleaseFeeUpdated(_newFee);
     }
 
+    function setRequiredEthAmount(uint256 _newAmount) external onlyOwner {
+        requiredEthAmount = _newAmount;
+        emit RequiredEthAmountUpdated(_newAmount);
+    }
+
+    function setOnlyLabelOwner(bool _onlyLabelOwner) external onlyOwner {
+        onlyLabelOwner = _onlyLabelOwner;
+        emit OnlyLabelOwnerUpdated(_onlyLabelOwner);
+    }
+
+    function swapExactInputSingle(uint256 amountIn, uint256 deadline) internal returns (uint256 amountOut) {
+        TransferHelper.safeApprove(WETH, address(swapRouter), amountIn);
+
+        ISwapRouter.ExactInputSingleParams memory params =
+            ISwapRouter.ExactInputSingleParams({
+                tokenIn: WETH,
+                tokenOut: swapTokenAddress,
+                fee: 3000,
+                recipient: address(this),
+                deadline: deadline,
+                amountIn: amountIn,
+                amountOutMinimum: 0,
+                sqrtPriceLimitX96: 0
+            });
+
+        amountOut = swapRouter.exactInputSingle{value: amountIn}(params);
+    }
+
     function sqrt(uint256 y) internal pure returns (uint256 z) {
         if (y > 3) {
             z = y;
@@ -192,6 +246,8 @@ contract Releaser is Ownable {
             z = 1;
         }
     }
+
+    receive() external payable {}
 }
 
 contract NewToken is ERC20 {
@@ -204,17 +260,31 @@ contract LabelFactory is Ownable {
     IERC20 public feeToken;
     uint256 public launchFee;
     address public uniswapFactory;
+    address public swapTokenAddress;
 
     event LabelCreated(address indexed releaserAddress, string labelName, address owner);
     event LaunchFeeUpdated(uint256 newFee);
+    event SwapTokenAddressUpdated(address newSwapTokenAddress);
 
-    constructor(address _feeTokenAddress, uint256 _launchFee, address _uniswapFactory, address initialOwner) Ownable(initialOwner) {
+    constructor(
+        address _feeTokenAddress, 
+        uint256 _launchFee, 
+        address _uniswapFactory, 
+        address _swapTokenAddress,
+        address initialOwner
+    ) Ownable(initialOwner) {
         feeToken = IERC20(_feeTokenAddress);
         launchFee = _launchFee;
         uniswapFactory = _uniswapFactory;
+        swapTokenAddress = _swapTokenAddress;
     }
 
-    function createLabel(string memory labelName, uint256 initialReleaseFee) external returns (address) {
+    function createLabel(
+        string memory labelName, 
+        uint256 initialReleaseFee, 
+        uint256 initialRequiredEthAmount,
+        bool initialOnlyLabelOwner
+    ) external returns (address) {
         require(feeToken.transferFrom(msg.sender, owner(), launchFee), "Launch fee transfer failed");
 
         Releaser newReleaser = new Releaser(
@@ -222,7 +292,10 @@ contract LabelFactory is Ownable {
             initialReleaseFee,
             uniswapFactory,
             labelName,
-            msg.sender
+            msg.sender,
+            initialRequiredEthAmount,
+            initialOnlyLabelOwner,
+            swapTokenAddress
         );
 
         emit LabelCreated(address(newReleaser), labelName, msg.sender);
@@ -240,5 +313,10 @@ contract LabelFactory is Ownable {
 
     function setUniswapFactory(address _uniswapFactory) external onlyOwner {
         uniswapFactory = _uniswapFactory;
+    }
+
+    function setSwapTokenAddress(address _swapTokenAddress) external onlyOwner {
+        swapTokenAddress = _swapTokenAddress;
+        emit SwapTokenAddressUpdated(_swapTokenAddress);
     }
 }
