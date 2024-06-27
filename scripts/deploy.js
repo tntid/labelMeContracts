@@ -33,6 +33,10 @@ async function main() {
 
   console.log("LabelFactory deployed to:", await labelFactory.getAddress());
 
+  // Get LabelOwnershipToken address
+  const labelOwnershipTokenAddress = await labelFactory.labelOwnershipToken();
+  console.log("LabelOwnershipToken deployed to:", labelOwnershipTokenAddress);
+
   // Verify contracts
   if (hre.network.name !== "hardhat" && hre.network.name !== "localhost") {
     console.log("Waiting for block confirmations...");
@@ -56,6 +60,11 @@ async function main() {
     await hre.run("verify:verify", {
       address: await labelFactory.getAddress(),
       constructorArguments: [await feeManager.getAddress()],
+    });
+
+    await hre.run("verify:verify", {
+      address: labelOwnershipTokenAddress,
+      constructorArguments: [await labelFactory.getAddress()],
     });
   }
 }
