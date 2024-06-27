@@ -37,7 +37,7 @@ contract Releaser {
     ReleaseNFT public immutable releaseNFT;
     uint256 public requiredEthAmount;
     bool public onlyLabelOwnerCanCreate; 
-    address public swapTokenAddress;
+    address public immutable swapTokenAddress; 
     ISwapRouter public constant swapRouter = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
     IERC721 public immutable labelOwnershipToken;
     uint256 public immutable labelOwnershipTokenId;
