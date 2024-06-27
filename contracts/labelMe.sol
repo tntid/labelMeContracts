@@ -63,6 +63,22 @@ contract ReleaseNFT is ERC721, ERC721Enumerable, Ownable {
     }
 }
 
+
+contract LabelOwnershipToken is ERC721, Ownable {
+    uint256 private _tokenIdCounter;
+
+    constructor(address initialOwner) ERC721("Label Ownership Token", "LOT") Ownable(initialOwner) {
+        _tokenIdCounter = 1;
+    }
+
+    function mint(address to) public onlyOwner returns (uint256) {
+        uint256 tokenId = _tokenIdCounter;
+        _safeMint(to, tokenId);
+        _tokenIdCounter++;
+        return tokenId;
+    }
+}
+
 // Add IWETH interface
 interface IWETH {
     function deposit() external payable;
@@ -85,6 +101,12 @@ contract Releaser {
     IERC721 public labelOwnershipToken;
     uint256 public labelOwnershipTokenId;
 
+// Mapping to store whitelisted addresses
+    mapping(address => bool) public whitelistedCreators;
+
+ // array to keep track of whitelisted addresses
+    address[] public whitelistedCreatorsList;
+
     struct Release {
         address tokenAddress;
         string name;
@@ -105,11 +127,22 @@ contract Releaser {
     event RequiredEthAmountUpdated(uint256 newAmount);
     event OnlyLabelOwnerUpdated(bool newValue);
 
-    modifier onlyLabelOwner() {
-        require(labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender, "Not the label owner");
+ modifier onlyLabelOwnerOrWhitelisted() {
+        require(
+            labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender || 
+            whitelistedCreators[msg.sender],
+            "Not authorized to perform this action"
+        );
         _;
     }
 
+ modifier onlyLabelOwner() {
+        require(
+            labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender,
+            "Not authorized to perform this action"
+        );
+        _;
+    }
     constructor(
         address _feeTokenAddress,
         uint256 _releaseFee,
@@ -133,7 +166,46 @@ contract Releaser {
         swapTokenAddress = _swapTokenAddress;
     }
 
-    function createNewRelease(
+   // Function to check if an address is whitelisted
+    function isWhitelisted(address creator) public view returns (bool) {
+        return whitelistedCreators[creator];
+    }
+
+    // Function to get all whitelisted addresses
+    function getWhitelistedCreators() public view returns (address[] memory) {
+        return whitelistedCreatorsList;
+    }
+
+    // Update the addToWhitelist function
+    function addToWhitelist(address[] memory creators) external {
+        require(labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender, "Only label owner can modify whitelist");
+        for (uint i = 0; i < creators.length; i++) {
+            if (!whitelistedCreators[creators[i]]) {
+                whitelistedCreators[creators[i]] = true;
+                whitelistedCreatorsList.push(creators[i]);
+            }
+        }
+    }
+
+    // Update the removeFromWhitelist function
+    function removeFromWhitelist(address[] memory creators) external {
+        require(labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender, "Only label owner can modify whitelist");
+        for (uint i = 0; i < creators.length; i++) {
+            if (whitelistedCreators[creators[i]]) {
+                whitelistedCreators[creators[i]] = false;
+                // Remove from the list
+                for (uint j = 0; j < whitelistedCreatorsList.length; j++) {
+                    if (whitelistedCreatorsList[j] == creators[i]) {
+                        whitelistedCreatorsList[j] = whitelistedCreatorsList[whitelistedCreatorsList.length - 1];
+                        whitelistedCreatorsList.pop();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+      function createNewRelease(
         string memory name,
         string memory symbol,
         uint256 totalSupply,
@@ -142,8 +214,12 @@ contract Releaser {
         uint256 minPrice,
         uint256 maxPrice
     ) external payable {
-       if (onlyLabelOwnerCanCreate) {
-            require(labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender, "Only label owner can create releases");
+        if (onlyLabelOwnerCanCreate) {
+            require(
+                labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender || 
+                whitelistedCreators[msg.sender],
+                "Not authorized to create releases"
+            );
         }
         require(msg.value >= requiredEthAmount, "Insufficient ETH sent");
         require(feeToken.transferFrom(msg.sender, labelOwnershipToken.ownerOf(labelOwnershipTokenId), releaseFee), "Release fee transfer failed");
@@ -296,8 +372,9 @@ contract LabelFactory is Ownable {
     uint256 public launchFee;
     address public uniswapFactory;
     address public swapTokenAddress;
+    LabelOwnershipToken public labelOwnershipToken;
 
-    event LabelCreated(address indexed releaserAddress, string labelName, address labelOwnershipTokenAddress, uint256 labelOwnershipTokenId);
+    event LabelCreated(address indexed releaserAddress, string labelName, uint256 labelOwnershipTokenId);
     event LaunchFeeUpdated(uint256 newFee);
     event SwapTokenAddressUpdated(address newSwapTokenAddress);
 
@@ -312,33 +389,34 @@ contract LabelFactory is Ownable {
         launchFee = _launchFee;
         uniswapFactory = _uniswapFactory;
         swapTokenAddress = _swapTokenAddress;
+        labelOwnershipToken = new LabelOwnershipToken(address(this));
     }
 
     function createLabel(
-    string memory labelName, 
-    uint256 initialReleaseFee, 
-    uint256 initialRequiredEthAmount,
-    bool initialOnlyLabelOwnerCanCreate,
-    address labelOwnershipTokenAddress,
-    uint256 labelOwnershipTokenId
-) external returns (address) {
-    require(feeToken.transferFrom(msg.sender, owner(), launchFee), "Launch fee transfer failed");
+        string memory labelName, 
+        uint256 initialReleaseFee, 
+        uint256 initialRequiredEthAmount,
+        bool initialOnlyLabelOwnerCanCreate
+    ) external returns (address) {
+        require(feeToken.transferFrom(msg.sender, owner(), launchFee), "Launch fee transfer failed");
 
-    Releaser newReleaser = new Releaser(
-        address(feeToken),
-        initialReleaseFee,
-        uniswapFactory,
-        labelName,
-        labelOwnershipTokenAddress,
-        labelOwnershipTokenId,
-        initialRequiredEthAmount,
-        initialOnlyLabelOwnerCanCreate,
-        swapTokenAddress
-    );
+        uint256 labelOwnershipTokenId = labelOwnershipToken.mint(msg.sender);
 
-    emit LabelCreated(address(newReleaser), labelName, labelOwnershipTokenAddress, labelOwnershipTokenId);
-    return address(newReleaser);
-}
+        Releaser newReleaser = new Releaser(
+            address(feeToken),
+            initialReleaseFee,
+            uniswapFactory,
+            labelName,
+            address(labelOwnershipToken),
+            labelOwnershipTokenId,
+            initialRequiredEthAmount,
+            initialOnlyLabelOwnerCanCreate,
+            swapTokenAddress
+        );
+
+        emit LabelCreated(address(newReleaser), labelName, labelOwnershipTokenId);
+        return address(newReleaser);
+    }
 
     function setLaunchFee(uint256 _newFee) external onlyOwner {
         launchFee = _newFee;
