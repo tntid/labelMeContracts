@@ -63,13 +63,13 @@ contract ReleaseNFT is ERC721, ERC721Enumerable, Ownable {
     }
 }
 
-    // Add IWETH interface
-    interface IWETH {
-        function deposit() external payable;
-        function withdraw(uint256) external;
-    }
+// Add IWETH interface
+interface IWETH {
+    function deposit() external payable;
+    function withdraw(uint256) external;
+}
 
-contract Releaser is Ownable {
+contract Releaser {
     IERC20 public feeToken;
     uint256 public releaseFee;
     IUniswapV3Factory public uniswapFactory;
@@ -77,9 +77,13 @@ contract Releaser is Ownable {
     string public labelName;
     ReleaseNFT public releaseNFT;
     uint256 public requiredEthAmount;
-    bool public onlyLabelOwner;
+    bool public onlyLabelOwnerCanCreate; 
     address public swapTokenAddress;
     ISwapRouter public constant swapRouter = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
+
+    // New variables for ERC721 ownership
+    IERC721 public labelOwnershipToken;
+    uint256 public labelOwnershipTokenId;
 
     struct Release {
         address tokenAddress;
@@ -101,23 +105,31 @@ contract Releaser is Ownable {
     event RequiredEthAmountUpdated(uint256 newAmount);
     event OnlyLabelOwnerUpdated(bool newValue);
 
+    modifier onlyLabelOwner() {
+        require(labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender, "Not the label owner");
+        _;
+    }
+
     constructor(
         address _feeTokenAddress,
         uint256 _releaseFee,
         address _uniswapFactory,
         string memory _labelName,
-        address _owner,
+        address _labelOwnershipTokenAddress,
+        uint256 _labelOwnershipTokenId,
         uint256 _initialRequiredEthAmount,
-        bool _onlyLabelOwner,
+        bool _onlyLabelOwnerCanCreate,
         address _swapTokenAddress
-    ) Ownable(_owner) {
+    ) {
         feeToken = IERC20(_feeTokenAddress);
         releaseFee = _releaseFee;
         uniswapFactory = IUniswapV3Factory(_uniswapFactory);
         labelName = _labelName;
-        releaseNFT = new ReleaseNFT(string(abi.encodePacked(_labelName, " Releases")), "RLSNFT", _owner);
+        labelOwnershipToken = IERC721(_labelOwnershipTokenAddress);
+        labelOwnershipTokenId = _labelOwnershipTokenId;
+        releaseNFT = new ReleaseNFT(string(abi.encodePacked(_labelName, " Releases")), "RLSNFT", address(this));
         requiredEthAmount = _initialRequiredEthAmount;
-        onlyLabelOwner = _onlyLabelOwner;
+        onlyLabelOwnerCanCreate = _onlyLabelOwnerCanCreate;
         swapTokenAddress = _swapTokenAddress;
     }
 
@@ -130,11 +142,11 @@ contract Releaser is Ownable {
         uint256 minPrice,
         uint256 maxPrice
     ) external payable {
-        if (onlyLabelOwner) {
-            require(msg.sender == owner(), "Only label owner can create releases");
+       if (onlyLabelOwnerCanCreate) {
+            require(labelOwnershipToken.ownerOf(labelOwnershipTokenId) == msg.sender, "Only label owner can create releases");
         }
         require(msg.value >= requiredEthAmount, "Insufficient ETH sent");
-        require(feeToken.transferFrom(msg.sender, owner(), releaseFee), "Release fee transfer failed");
+        require(feeToken.transferFrom(msg.sender, labelOwnershipToken.ownerOf(labelOwnershipTokenId), releaseFee), "Release fee transfer failed");
         require(swapTokenAddress != address(0), "Swap token address not set");
 
         uint256 halfEthAmount = msg.value / 2;
@@ -146,7 +158,7 @@ contract Releaser is Ownable {
         require(amountOut > 0, "Swap failed");
 
         // Transfer the swapped tokens to the label owner
-        IERC20(swapTokenAddress).transfer(owner(), amountOut);
+        IERC20(swapTokenAddress).transfer(labelOwnershipToken.ownerOf(labelOwnershipTokenId), amountOut);
 
         // Create the new token with 0 decimals
         string memory fullName = string(abi.encodePacked(labelName, " ", name));
@@ -219,19 +231,19 @@ contract Releaser is Ownable {
         emit FeesClaimed(releaseIndex, amount0, amount1, msg.sender);
     }
 
-    function setReleaseFee(uint256 _newFee) external onlyOwner {
+    function setReleaseFee(uint256 _newFee) external onlyLabelOwner {
         releaseFee = _newFee;
         emit ReleaseFeeUpdated(_newFee);
     }
 
-    function setRequiredEthAmount(uint256 _newAmount) external onlyOwner {
+    function setRequiredEthAmount(uint256 _newAmount) external onlyLabelOwner {
         requiredEthAmount = _newAmount;
         emit RequiredEthAmountUpdated(_newAmount);
     }
 
-    function setOnlyLabelOwner(bool _onlyLabelOwner) external onlyOwner {
-        onlyLabelOwner = _onlyLabelOwner;
-        emit OnlyLabelOwnerUpdated(_onlyLabelOwner);
+    function setOnlyLabelOwnerCanCreate(bool _onlyLabelOwnerCanCreate) external onlyLabelOwner {
+        onlyLabelOwnerCanCreate = _onlyLabelOwnerCanCreate;
+        emit OnlyLabelOwnerUpdated(_onlyLabelOwnerCanCreate);
     }
 
     function swapExactInputSingle(uint256 amountIn, uint256 deadline) internal returns (uint256 amountOut) {
@@ -285,7 +297,7 @@ contract LabelFactory is Ownable {
     address public uniswapFactory;
     address public swapTokenAddress;
 
-    event LabelCreated(address indexed releaserAddress, string labelName, address owner);
+    event LabelCreated(address indexed releaserAddress, string labelName, address labelOwnershipTokenAddress, uint256 labelOwnershipTokenId);
     event LaunchFeeUpdated(uint256 newFee);
     event SwapTokenAddressUpdated(address newSwapTokenAddress);
 
@@ -303,27 +315,30 @@ contract LabelFactory is Ownable {
     }
 
     function createLabel(
-        string memory labelName, 
-        uint256 initialReleaseFee, 
-        uint256 initialRequiredEthAmount,
-        bool initialOnlyLabelOwner
-    ) external returns (address) {
-        require(feeToken.transferFrom(msg.sender, owner(), launchFee), "Launch fee transfer failed");
+    string memory labelName, 
+    uint256 initialReleaseFee, 
+    uint256 initialRequiredEthAmount,
+    bool initialOnlyLabelOwnerCanCreate,
+    address labelOwnershipTokenAddress,
+    uint256 labelOwnershipTokenId
+) external returns (address) {
+    require(feeToken.transferFrom(msg.sender, owner(), launchFee), "Launch fee transfer failed");
 
-        Releaser newReleaser = new Releaser(
-            address(feeToken),
-            initialReleaseFee,
-            uniswapFactory,
-            labelName,
-            msg.sender,
-            initialRequiredEthAmount,
-            initialOnlyLabelOwner,
-            swapTokenAddress
-        );
+    Releaser newReleaser = new Releaser(
+        address(feeToken),
+        initialReleaseFee,
+        uniswapFactory,
+        labelName,
+        labelOwnershipTokenAddress,
+        labelOwnershipTokenId,
+        initialRequiredEthAmount,
+        initialOnlyLabelOwnerCanCreate,
+        swapTokenAddress
+    );
 
-        emit LabelCreated(address(newReleaser), labelName, msg.sender);
-        return address(newReleaser);
-    }
+    emit LabelCreated(address(newReleaser), labelName, labelOwnershipTokenAddress, labelOwnershipTokenId);
+    return address(newReleaser);
+}
 
     function setLaunchFee(uint256 _newFee) external onlyOwner {
         launchFee = _newFee;
@@ -338,7 +353,7 @@ contract LabelFactory is Ownable {
         uniswapFactory = _uniswapFactory;
     }
 
-    function setSwapTokenAddress(address _swapTokenAddress) external onlyOwner {
+function setSwapTokenAddress(address _swapTokenAddress) external onlyOwner {
         swapTokenAddress = _swapTokenAddress;
         emit SwapTokenAddressUpdated(_swapTokenAddress);
     }
