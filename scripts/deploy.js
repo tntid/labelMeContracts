@@ -11,8 +11,9 @@ async function main() {
   const uniswapFactoryAddress = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
   const swapTokenAddress = "0xA61152baa58478e1089c000e84755f889aC3D442";
 
-  const LabelFactory = await hre.ethers.getContractFactory("LabelFactory");
-  const labelFactory = await LabelFactory.deploy(
+  // Deploy FeeManager
+  const FeeManager = await hre.ethers.getContractFactory("FeeManager");
+  const feeManager = await FeeManager.deploy(
     feeTokenAddress,
     launchFee,
     uniswapFactoryAddress,
@@ -20,10 +21,43 @@ async function main() {
     deployer.address
   );
 
+  await feeManager.waitForDeployment();
+
+  console.log("FeeManager deployed to:", await feeManager.getAddress());
+
+  // Deploy LabelFactory
+  const LabelFactory = await hre.ethers.getContractFactory("LabelFactory");
+  const labelFactory = await LabelFactory.deploy(await feeManager.getAddress());
 
   await labelFactory.waitForDeployment();
 
   console.log("LabelFactory deployed to:", await labelFactory.getAddress());
+
+  // Verify contracts
+  if (hre.network.name !== "hardhat" && hre.network.name !== "localhost") {
+    console.log("Waiting for block confirmations...");
+    
+    await feeManager.deploymentTransaction().wait(5); // Wait for 5 block confirmations
+    await labelFactory.deploymentTransaction().wait(5);
+
+    console.log("Verifying contracts...");
+
+    await hre.run("verify:verify", {
+      address: await feeManager.getAddress(),
+      constructorArguments: [
+        feeTokenAddress,
+        launchFee,
+        uniswapFactoryAddress,
+        swapTokenAddress,
+        deployer.address
+      ],
+    });
+
+    await hre.run("verify:verify", {
+      address: await labelFactory.getAddress(),
+      constructorArguments: [await feeManager.getAddress()],
+    });
+  }
 }
 
 main()
