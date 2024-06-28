@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -8,13 +10,28 @@ import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
 enum ChartDuration { Day, Week, Month, Quarter, Year }
 
-contract ArtChartFactory is Ownable(msg.sender) {
+contract ArtChartOwnership is ERC721Enumerable, Ownable {
+    uint256 private _tokenIdCounter;
+
+    constructor() ERC721("ArtChartOwnership", "ACO") Ownable(msg.sender) {}
+
+    function mintChartOwnership(address to) external onlyOwner returns (uint256) {
+        uint256 tokenId = _tokenIdCounter;
+        _safeMint(to, tokenId);
+        _tokenIdCounter++;
+        return tokenId;
+    }
+}
+
+contract ArtChartFactory is Ownable {
+    ArtChartOwnership public artChartOwnership;
     bool public onlyAllowOwner;
 
-    event ChartCreated(address chartAddress, bool isOpenChart, address[] allowedNFTContracts, bool onlyAllowOwner, ChartDuration duration);
+    event ChartCreated(address chartAddress, uint256 ownershipTokenId, bool isOpenChart, address[] allowedNFTContracts, bool onlyAllowOwner, ChartDuration duration);
 
-    constructor(bool _onlyAllowOwner) {
+    constructor(bool _onlyAllowOwner) Ownable(msg.sender) {
         onlyAllowOwner = _onlyAllowOwner;
+        artChartOwnership = new ArtChartOwnership();
     }
 
     modifier onlyAuthorized() {
@@ -28,18 +45,21 @@ contract ArtChartFactory is Ownable(msg.sender) {
         address[] memory allowedNFTContracts,
         bool _onlyAllowOwner,
         ChartDuration _duration
-    ) external onlyAuthorized returns (address) {
+    ) external onlyAuthorized returns (address, uint256) {
+        uint256 ownershipTokenId = artChartOwnership.mintChartOwnership(msg.sender);
+        
         ArtChart newChart = new ArtChart(
             stakingToken,
             isOpenChart,
             allowedNFTContracts,
             _onlyAllowOwner,
             _duration,
-            msg.sender
+            address(artChartOwnership),
+            ownershipTokenId
         );
         
-        emit ChartCreated(address(newChart), isOpenChart, allowedNFTContracts, _onlyAllowOwner, _duration);
-        return address(newChart);
+        emit ChartCreated(address(newChart), ownershipTokenId, isOpenChart, allowedNFTContracts, _onlyAllowOwner, _duration);
+        return (address(newChart), ownershipTokenId);
     }
 
     function setOnlyAllowOwner(bool _onlyAllowOwner) external onlyOwner {
@@ -47,7 +67,7 @@ contract ArtChartFactory is Ownable(msg.sender) {
     }
 }
 
-contract ArtChart is Ownable {
+contract ArtChart {
     struct Entry {
         address nftContract;
         uint256 tokenId;
@@ -62,6 +82,8 @@ contract ArtChart is Ownable {
         uint256 score;
     }
 
+    ArtChartOwnership public artChartOwnership;
+    uint256 public ownershipTokenId;
     IERC20 public stakingToken;
     uint256 private _periodCounter;
     uint256 public constant CHART_SIZE = 10;
@@ -83,8 +105,13 @@ contract ArtChart is Ownable {
     event StakeWithdrawn(uint256 indexed period, address indexed nftContract, uint256 indexed tokenId, uint256 amount);
     event StakeRolledOver(uint256 indexed fromPeriod, uint256 indexed toPeriod, address indexed nftContract, uint256 tokenId, uint256 amount);
 
+    modifier onlyOwner() {
+        require(artChartOwnership.ownerOf(ownershipTokenId) == msg.sender, "Not the chart owner");
+        _;
+    }
+
     modifier onlyAuthorized() {
-        require(!onlyAllowOwner || msg.sender == owner(), "Not authorized");
+        require(!onlyAllowOwner || artChartOwnership.ownerOf(ownershipTokenId) == msg.sender, "Not authorized");
         _;
     }
 
@@ -94,12 +121,15 @@ contract ArtChart is Ownable {
         address[] memory _allowedNFTContracts,
         bool _onlyAllowOwner,
         ChartDuration _duration,
-        address _owner
-    ) Ownable(_owner) {
+        address _artChartOwnership,
+        uint256 _ownershipTokenId
+    ) {
         stakingToken = IERC20(_stakingToken);
         isOpenChart = _isOpenChart;
         onlyAllowOwner = _onlyAllowOwner;
         duration = _duration;
+        artChartOwnership = ArtChartOwnership(_artChartOwnership);
+        ownershipTokenId = _ownershipTokenId;
         
         if (!isOpenChart) {
             for (uint i = 0; i < _allowedNFTContracts.length; i++) {
@@ -177,7 +207,7 @@ contract ArtChart is Ownable {
     function finalizePeriodChart() external onlyAuthorized {
         require(block.timestamp >= periodStartTimes[_periodCounter] + PERIOD_DURATION, "Period not yet over");
 
-        // ... (rest of the function remains the same)
+        // ... (implementation of chart finalization logic)
 
         // Start new period
         _periodCounter++;
@@ -207,34 +237,34 @@ contract ArtChart is Ownable {
         emit StakeWithdrawn(lastCompletedPeriod, nftContract, tokenId, amount);
     }
 
-function rolloverStakes() external onlyAuthorized {
-    require(_periodCounter > 1, "No completed periods yet");
-    require(block.timestamp > periodStartTimes[_periodCounter] + WITHDRAWAL_WINDOW, "Withdrawal window still open");
+    function rolloverStakes() external onlyAuthorized {
+        require(_periodCounter > 1, "No completed periods yet");
+        require(block.timestamp > periodStartTimes[_periodCounter] + WITHDRAWAL_WINDOW, "Withdrawal window still open");
 
-    uint256 lastCompletedPeriod = _periodCounter - 1;
-    uint256 currentPeriod = _periodCounter;
+        uint256 lastCompletedPeriod = _periodCounter - 1;
+        uint256 currentPeriod = _periodCounter;
 
-    for (address nftContract = address(1); nftContract != address(0); nftContract = address(uint160(nftContract) + 1)) {
-        for (uint256 tokenId = 0; tokenId < type(uint256).max; tokenId++) {
-            Entry storage lastPeriodEntry = entries[lastCompletedPeriod][nftContract][tokenId];
-            if (lastPeriodEntry.nftContract != address(0) && lastPeriodEntry.stakedAmount > 0) {
-                // Roll over the stake to the current period
-                entries[currentPeriod][nftContract][tokenId] = Entry({
-                    nftContract: nftContract,
-                    tokenId: tokenId,
-                    uniswapV3Pool: lastPeriodEntry.uniswapV3Pool,
-                    stakedAmount: lastPeriodEntry.stakedAmount,
-                    observationIndex: 0 // Reset observation index for the new period
-                });
+        for (address nftContract = address(1); nftContract != address(0); nftContract = address(uint160(nftContract) + 1)) {
+            for (uint256 tokenId = 0; tokenId < type(uint256).max; tokenId++) {
+                Entry storage lastPeriodEntry = entries[lastCompletedPeriod][nftContract][tokenId];
+                if (lastPeriodEntry.nftContract != address(0) && lastPeriodEntry.stakedAmount > 0) {
+                    // Roll over the stake to the current period
+                    entries[currentPeriod][nftContract][tokenId] = Entry({
+                        nftContract: nftContract,
+                        tokenId: tokenId,
+                        uniswapV3Pool: lastPeriodEntry.uniswapV3Pool,
+                        stakedAmount: lastPeriodEntry.stakedAmount,
+                        observationIndex: 0 // Reset observation index for the new period
+                    });
 
-                emit StakeRolledOver(lastCompletedPeriod, currentPeriod, nftContract, tokenId, lastPeriodEntry.stakedAmount);
+                    emit StakeRolledOver(lastCompletedPeriod, currentPeriod, nftContract, tokenId, lastPeriodEntry.stakedAmount);
 
-                // Clear the entry from the last period
-                delete entries[lastCompletedPeriod][nftContract][tokenId];
+                    // Clear the entry from the last period
+                    delete entries[lastCompletedPeriod][nftContract][tokenId];
+                }
             }
         }
     }
-}
 
     function getCurrentChartPositions() external view returns (ChartEntry[] memory) {
         ChartEntry[] memory allEntries = new ChartEntry[](1000); // Arbitrary large number, adjust as needed
