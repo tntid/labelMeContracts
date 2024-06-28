@@ -128,7 +128,6 @@ contract ArtChart is Ownable {
 
         _periodCounter = 1; // Start from period 1
         periodStartTimes[_periodCounter] = block.timestamp;
-
     }
 
     function submitEntry(address nftContract, uint256 tokenId, address uniswapV3Pool) external onlyAuthorized {
@@ -162,7 +161,7 @@ contract ArtChart is Ownable {
         require(entry.nftContract != address(0), "Entry does not exist");
 
         IUniswapV3Pool pool = IUniswapV3Pool(entry.uniswapV3Pool);
-        (uint256 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, , , ) = pool.slot0();
+        (, , uint16 observationIndex, , , , ) = pool.slot0();
         entry.observationIndex = uint256(observationIndex);
 
         updatePoints(nftContract, tokenId);
@@ -208,15 +207,34 @@ contract ArtChart is Ownable {
         emit StakeWithdrawn(lastCompletedPeriod, nftContract, tokenId, amount);
     }
 
-    function rolloverStakes() external onlyAuthorized {
-        require(_periodCounter > 1, "No completed periods yet");
-        require(block.timestamp > periodStartTimes[_periodCounter] + WITHDRAWAL_WINDOW, "Withdrawal window still open");
+function rolloverStakes() external onlyAuthorized {
+    require(_periodCounter > 1, "No completed periods yet");
+    require(block.timestamp > periodStartTimes[_periodCounter] + WITHDRAWAL_WINDOW, "Withdrawal window still open");
 
-        uint256 lastCompletedPeriod = _periodCounter - 1;
-        uint256 currentPeriod = _periodCounter;
+    uint256 lastCompletedPeriod = _periodCounter - 1;
+    uint256 currentPeriod = _periodCounter;
 
-        // ... (rest of the function remains the same)
+    for (address nftContract = address(1); nftContract != address(0); nftContract = address(uint160(nftContract) + 1)) {
+        for (uint256 tokenId = 0; tokenId < type(uint256).max; tokenId++) {
+            Entry storage lastPeriodEntry = entries[lastCompletedPeriod][nftContract][tokenId];
+            if (lastPeriodEntry.nftContract != address(0) && lastPeriodEntry.stakedAmount > 0) {
+                // Roll over the stake to the current period
+                entries[currentPeriod][nftContract][tokenId] = Entry({
+                    nftContract: nftContract,
+                    tokenId: tokenId,
+                    uniswapV3Pool: lastPeriodEntry.uniswapV3Pool,
+                    stakedAmount: lastPeriodEntry.stakedAmount,
+                    observationIndex: 0 // Reset observation index for the new period
+                });
+
+                emit StakeRolledOver(lastCompletedPeriod, currentPeriod, nftContract, tokenId, lastPeriodEntry.stakedAmount);
+
+                // Clear the entry from the last period
+                delete entries[lastCompletedPeriod][nftContract][tokenId];
+            }
+        }
     }
+}
 
     function getCurrentChartPositions() external view returns (ChartEntry[] memory) {
         ChartEntry[] memory allEntries = new ChartEntry[](1000); // Arbitrary large number, adjust as needed
