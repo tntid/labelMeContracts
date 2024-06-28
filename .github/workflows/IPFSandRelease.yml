@@ -1,0 +1,62 @@
+name: Upload MP3s to IPFS and Call Contract
+
+on:
+  push:
+    branches:
+      - release
+    paths:
+      - 'releases/**/*.mp3'
+
+jobs:
+  upload-and-call:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '16'
+
+      - name: Install dependencies
+        run: |
+          npm install @pinata/sdk
+          npm install ethers
+
+      - name: Upload to IPFS and Call Contract
+        env:
+          PINATA_API_KEY: ${{ secrets.PINATA_API_KEY }}
+          PINATA_SECRET_API_KEY: ${{ secrets.PINATA_SECRET_API_KEY }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          CONTRACT_ADDRESS: 'your_contract_address_here'
+        run: |
+          const pinataSDK = require('@pinata/sdk');
+          const { ethers } = require('ethers');
+          const fs = require('fs');
+          const path = require('path');
+
+          const pinata = new pinataSDK(process.env.PINATA_API_KEY, process.env.PINATA_SECRET_API_KEY);
+          const provider = new ethers.providers.JsonRpcProvider('https://arb1.arbitrum.io/rpc');
+          const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+          const contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, ['function yourFunctionName(string memory ipfsHash) public'], wallet);
+
+          const releasesDir = './releases';
+          const files = fs.readdirSync(releasesDir).filter(file => path.extname(file).toLowerCase() === '.mp3');
+
+          for (const file of files) {
+            const filePath = path.join(releasesDir, file);
+            const readableStream = fs.createReadStream(filePath);
+            
+            try {
+              const result = await pinata.pinFileToIPFS(readableStream);
+              console.log(`Uploaded ${file} to IPFS with hash: ${result.IpfsHash}`);
+              
+              const tx = await contract.yourFunctionName(result.IpfsHash);
+              await tx.wait();
+              console.log(`Called contract function for ${file} with transaction hash: ${tx.hash}`);
+            } catch (error) {
+              console.error(`Error processing ${file}:`, error);
+            }
+          }
+        shell: node {0}
